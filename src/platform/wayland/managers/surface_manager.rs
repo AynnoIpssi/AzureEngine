@@ -1,3 +1,4 @@
+use crate::platform::wayland::managers::xdg_manager::ack_configure;
 use crate::platform::wayland::models::connection::WaylandConnection;
 pub fn commit(connection: &mut WaylandConnection, surface_id: u32) -> Result<(), String> {
     let mut msg = Vec::new();
@@ -31,6 +32,44 @@ pub fn wait_for_configure(connection: &mut WaylandConnection, xdg_surface_id: u3
         if object_id == xdg_surface_id && opcode == 0 {
             let serial = u32::from_le_bytes(args[0..4].try_into().unwrap());
             return Ok(serial);
+        }
+    }
+}
+
+pub fn run_event_loop(connection: &mut WaylandConnection, xdg_surface_id: u32, xdg_toplevel_id: u32, surface_id: u32, xdg_wm_base_id: u32) -> Result<(), String> {
+    loop {
+        let mut header = [0u8; 8];
+        connection.receive(&mut header)?;
+        let object_id = u32::from_le_bytes(header[0..4].try_into().unwrap());
+        let size_opcode = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let size = (size_opcode >> 16) as u16;
+        let opcode = (size_opcode & 0xFFFF) as u16;
+
+        let args_size = (size - 8) as usize;
+        let mut args = vec![0u8; args_size];
+        connection.receive(&mut args)?;
+
+        if (object_id == xdg_toplevel_id && opcode == 0){
+            // ignore
+        }
+
+        if (object_id == xdg_toplevel_id && opcode == 1){
+            return Ok(());
+        }
+
+        if (object_id == xdg_surface_id && opcode == 0){
+            let serial = u32::from_le_bytes(args[0..4].try_into().unwrap());
+            ack_configure(connection, xdg_surface_id, serial)?;
+            commit(connection, surface_id)?;
+        }
+
+        if object_id == xdg_wm_base_id && opcode == 0 {
+            let serial = u32::from_le_bytes(args[0..4].try_into().unwrap());
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&(xdg_wm_base_id).to_le_bytes());
+            msg.extend_from_slice(&((12u32 << 16 | 3u32).to_le_bytes()));
+            msg.extend_from_slice(&serial.to_le_bytes());
+            connection.send(&msg)?;
         }
     }
 }
