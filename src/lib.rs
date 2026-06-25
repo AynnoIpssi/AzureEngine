@@ -184,7 +184,7 @@
      use crate::platform::wayland::managers::shm_manager::{create_shm_pool, create_buffer};
      use crate::platform::wayland::managers::compositor_manager::create_surface;
      use crate::platform::wayland::managers::xdg_manager::{get_xdg_surface, get_toplevel, ack_configure, attach};
-     use crate::platform::wayland::managers::surface_manager::{commit, wait_for_configure};
+     use crate::platform::wayland::managers::surface_manager::{commit, wait_for_configure, run_event_loop};
 
      #[test]
      fn test_empty_window() {
@@ -238,7 +238,7 @@
          let xdg_surface_id = get_xdg_surface(&mut connection, xdg_wm_base_id, surface_id).expect("get xdg_surface");
          println!("9: xdg_surface created, id={}", xdg_surface_id);
 
-         get_toplevel(&mut connection, xdg_surface_id).expect("get toplevel");
+         let toplevel_id = get_toplevel(&mut connection, xdg_surface_id).expect("get toplevel");
          println!("10: toplevel created");
 
          commit(&mut connection, surface_id).expect("initial commit");
@@ -256,6 +256,7 @@
          commit(&mut connection, surface_id).expect("final commit");
          println!("15: final commit, window should be visible!");
 
-         thread::sleep(Duration::from_secs(10   ));
+         run_event_loop(&mut connection, xdg_surface_id, toplevel_id, surface_id, xdg_wm_base_id)
+             .expect("event loop failed");
      }
  }
