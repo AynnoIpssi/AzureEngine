@@ -6,3 +6,4 @@ pub mod bind_manager;
 pub mod compositor_manager;
 pub mod xdg_manager;
 pub mod surface_manager;
+pub mod window_manager;

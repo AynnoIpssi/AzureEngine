@@ -2,7 +2,6 @@ use std::io::Read;
 use std::io::Write;
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixStream;
-use libc::{msghdr, size_t};
 use std::os::unix::io::AsRawFd;
 
 
@@ -20,6 +19,11 @@ impl WaylandConnection {
 
     pub fn send(&mut self, data: &[u8]) -> Result<(), String> {
         self.stream.write_all(data)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), String> {
+        self.stream.set_nonblocking(nonblocking)
             .map_err(|e| e.to_string())
     }
 
