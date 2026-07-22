@@ -1,5 +1,6 @@
-     mod platform;
-    // //
+     pub mod platform;
+    pub mod rendering;
+     // //
     // // pub fn add(left: u64, right: u64) -> u64 {
     // //     left + right
     // // }
@@ -172,12 +173,49 @@
     //         assert_eq!(toplevel_id, 11);
     //     }
     // }
+     //
+     // #[cfg(test)]
+     // mod tests7 {
+     //     use crate::platform::wayland::managers::window_manager::window_create;
+     //     use crate::platform::wayland::managers::surface_manager::run_event_loop;
+     //     use crate::platform::wayland::managers::shared_memory_manager::unmap_memory;
+     //
+     //     #[test]
+     //     fn test_empty_window() {
+     //         let mut window = window_create(800, 600)
+     //             .expect("Failed to create window");
+     //
+     //         let xdg_surface_id = window.xdg_surface_id();
+     //         let xdg_toplevel_id = window.xdg_toplevel_id();
+     //         let surface_id = window.surface_id();
+     //         let xdg_wm_id = window.xdg_wm_id();
+     //
+     //         run_event_loop(
+     //             &mut window,
+     //             xdg_surface_id,
+     //             xdg_toplevel_id,
+     //             surface_id,
+     //             xdg_wm_id,
+     //         ).expect("Event loop failed");
+     //
+     //         unmap_memory(window.ptr(), (window.width() * window.height() * 4) as usize)
+     //             .expect("Failed to unmap memory");
+     //     }
+     // }
 
      #[cfg(test)]
-     mod tests7 {
+     mod tests8 {
          use crate::platform::wayland::managers::window_manager::window_create;
          use crate::platform::wayland::managers::surface_manager::run_event_loop;
          use crate::platform::wayland::managers::shared_memory_manager::unmap_memory;
+         use crate::rendering::models::canvas::Canvas;
+         use crate::rendering::models::color::Color;
+         use crate::rendering::managers::renderer::draw_rect;
+         use crate::platform::wayland::managers::surface_manager::{commit, damage_buffer};
+         use crate::platform::wayland::managers::xdg_manager::attach;
+         use crate::rendering::services::shapes::line::{draw_line_horizontal, draw_line_vertical, draw_line};
+         use crate::rendering::services::shapes::circle::{draw_circle, draw_circle_filled};
+         use crate::rendering::services::shapes::rect::draw_rect_rounded;
 
          #[test]
          fn test_empty_window() {
@@ -189,6 +227,88 @@
              let surface_id = window.surface_id();
              let xdg_wm_id = window.xdg_wm_id();
 
+
+
+             let mut canvas=Canvas::new(800, 600);
+             let mut color = Color::new(255, 0, 0, 255); // rouge
+             canvas.buffer.chunks_mut(4).for_each(|p| {
+                 p[0] = 30;   // B
+                 p[1] = 30;   // G
+                 p[2] = 50; // R
+                 p[3] = 255; // A
+             });
+
+             let x = 100;
+             let y = 50;
+             let width = 200;
+             let height = 100;
+
+             draw_rect(x, y, width, height, &color, &mut canvas);
+
+             let x = 400;
+             let y = 50;
+             let width = 200;
+             let height = 100;
+             let radius = 10;
+
+             draw_rect_rounded(x, y, width, height, radius, &color, &mut canvas);
+
+             let x = 310;
+             let x_end = 450;
+             let y = 50;
+
+             draw_line_vertical(x, x_end, y, &color, &mut canvas);
+
+             let x = 460;
+             let y = 50;
+             let y_end = 190;
+
+             draw_line_horizontal(y, y_end, x, &color, &mut canvas);
+
+             let x: i32 = 460;
+             let y: i32 = 50;
+             let y_end: i32 = 190;
+             let x_end: i32 = 500;
+             
+             draw_line(x, y, x_end, y_end, &color, &mut canvas);
+
+             let cx = 300;
+             let cy = 300;
+             let radius = 100;
+             let color = Color::new(31, 255, 0, 255);
+
+             draw_circle(cx, cy, radius, &color, &mut canvas);
+
+             let cx = 600;
+             let cy = 300;
+             let radius = 100;
+             let color = Color::new(0, 255, 0, 255);
+
+             draw_circle_filled(cx, cy, radius, &color, &mut canvas);
+
+            use crate::rendering::services::buffer::get_pixel_index;
+            println!("centre cercle filled: {},{},{},{}",
+                canvas.buffer[get_pixel_index(700, 300, 800)],
+                canvas.buffer[get_pixel_index(700, 300, 800) + 1],
+                canvas.buffer[get_pixel_index(700, 300, 800) + 2],
+                canvas.buffer[get_pixel_index(700, 300, 800) + 3],
+            );
+
+             unsafe {
+                 std::ptr::copy_nonoverlapping(
+                     canvas.buffer.as_ptr(),
+                     window.ptr(),
+                     canvas.buffer.len(),
+                 );
+             }
+
+
+             let win_width = window.width();
+             let win_height = window.height();
+             let buffer_id = window.buffer_id();
+             attach(window.connection_mut(), surface_id, buffer_id).expect("Failed to attach");
+             damage_buffer(window.connection_mut(), surface_id, 0, 0, win_width, win_height).expect("Failed to damage");
+             commit(window.connection_mut(), surface_id).expect("Failed to commit");
              run_event_loop(
                  &mut window,
                  xdg_surface_id,
@@ -199,5 +319,7 @@
 
              unmap_memory(window.ptr(), (window.width() * window.height() * 4) as usize)
                  .expect("Failed to unmap memory");
+
+
          }
      }
