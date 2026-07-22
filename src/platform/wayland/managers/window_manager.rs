@@ -6,7 +6,7 @@
     use crate::platform::wayland::managers::shared_memory_manager::{create_shared_memory, map_memory};
     use crate::platform::wayland::managers::shm_manager::{create_shm_pool, create_buffer};
     use crate::platform::wayland::managers::compositor_manager::create_surface;
-    use crate::platform::wayland::managers::surface_manager::{commit, wait_for_configure};
+    use crate::platform::wayland::managers::surface_manager::{commit, wait_for_configure, damage_buffer};
     use crate::platform::wayland::managers::xdg_manager::{get_xdg_surface, get_toplevel, ack_configure, attach};
     use crate::platform::wayland::models::object_id_allocator::ObjectIdAllocator;
 
@@ -21,7 +21,7 @@
         let memory = create_shared_memory((width * height * 4) as usize)?;
         let ptr = map_memory(&memory)?;
         let pixels = unsafe { std::slice::from_raw_parts_mut(ptr, memory.size()) };
-        pixels.fill(0xFF);
+        //pixels.fill(0xFF);
 
         let pool_id = create_shm_pool(&mut connection, memory.fd(), memory.size())?;
         let buffer_id = create_buffer(&mut connection, pool_id, width, height)?;
@@ -33,6 +33,7 @@
         commit(&mut connection, surface_id)?;
         let serial = wait_for_configure(&mut connection, xdg_surface_id)?;
         ack_configure(&mut connection, xdg_surface_id, serial)?;
+        damage_buffer(&mut connection, surface_id, 0, 0, width, height)?;
         attach(&mut connection, surface_id, buffer_id)?;
         commit(&mut connection, surface_id)?;
 
