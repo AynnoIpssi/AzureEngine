@@ -1,9 +1,9 @@
 # Azure Engine — Technical Documentation
 
-**Version:** V0.1  
+**Version:** V0.2  
 **Language:** Rust (2024 edition)  
 **Platform:** Linux (Wayland)  
-**Status:** Active development — persistent interactive window achieved
+**Status:** Active development — rendering module in progress
 
 ---
 
@@ -16,10 +16,11 @@
 5. [Project structure](#5-project-structure)
 6. [Models — data structures](#6-models--data-structures)
 7. [Managers — logic and operations](#7-managers--logic-and-operations)
-8. [The full window creation sequence](#8-the-full-window-creation-sequence)
-9. [Dependencies](#9-dependencies)
-10. [Current capabilities and limitations](#10-current-capabilities-and-limitations)
-11. [What comes next](#11-what-comes-next)
+8. [Rendering module](#8-rendering-module)
+9. [The full window creation sequence](#9-the-full-window-creation-sequence)
+10. [Dependencies](#10-dependencies)
+11. [Current capabilities and limitations](#11-current-capabilities-and-limitations)
+12. [What comes next](#12-what-comes-next)
 
 ---
 
@@ -70,15 +71,19 @@ Before reading the code, three concepts are essential.
 
 **Shared memory** is the mechanism that lets an application's pixel data reach the compositor without being copied. The application allocates a region of memory using the `memfd_create` system call, fills it with pixel data, and then transmits the file descriptor (a number referencing that memory region) to the compositor using a special kernel mechanism called `SCM_RIGHTS`. Once the compositor receives this file descriptor, both processes point to the exact same physical RAM — there is no network transfer, no data copy, just two processes reading and writing the same bytes.
 
+**The pixel buffer** is a flat 1D array of bytes in shared memory. Every pixel occupies exactly 4 bytes in BGRA order (Blue, Green, Red, Alpha). The position of pixel `(x, y)` in this flat array is computed as `(y * width + x) * 4`. Wayland requires the `damage_buffer` call before each `commit` to signal which region of the buffer has changed.
+
 ---
 
 ## 4. Architecture overview
 
-The codebase follows a strict model/manager separation, consistent with the conventions established in Azure Core:
+The codebase follows a strict model/manager/service separation:
 
 **Models** hold data. They are plain structs with constructors and getters, no business logic.
 
 **Managers** hold logic. They are collections of free functions that operate on models and send/receive messages over the connection.
+
+**Services** (in the rendering module) are isolated operations on the canvas — each shape, effect, or utility is a separate file.
 
 The `Window` struct is the central object exposed to the rest of the platform. It owns the `WaylandConnection`, all Wayland object ids, the pixel pointer, and the dimensions. It implements the `AzureWindowProvider` trait from Azure Core, making it usable by Foundation and applications without any Wayland-specific knowledge on their side.
 
@@ -88,31 +93,50 @@ The `Window` struct is the central object exposed to the rest of the platform. I
 
 ```
 azure-engine/
-├── Cargo.toml                          # Package definition and dependencies
+├── Cargo.toml
 └── src/
-    ├── lib.rs                          # Crate root — declares modules, houses tests
-    └── platform/
-        ├── mod.rs                      # Declares the wayland submodule
-        └── wayland/
-            ├── mod.rs                  # Declares models and managers submodules
-            ├── models/
-            │   ├── mod.rs
-            │   ├── connection.rs           # WaylandConnection — socket wrapper
-            │   ├── registry.rs             # WaylandGlobal + WaylandRegistry
-            │   ├── shared_memory.rs        # WaylandMemory — shared memory descriptor
-            │   ├── window.rs               # Window — the main platform object
-            │   └── object_id_allocator.rs  # ObjectIdAllocator — dynamic id assignment
-            └── managers/
-                ├── mod.rs
-                ├── connection_manager.rs    # Opens the Wayland socket
-                ├── registry_manager.rs      # Discovers compositor services
-                ├── bind_manager.rs          # Binds (activates) any service
-                ├── shared_memory_manager.rs # Creates, maps, and unmaps shared memory
-                ├── shm_manager.rs           # Creates pixel pool and buffer
-                ├── compositor_manager.rs    # Creates a drawing surface
-                ├── xdg_manager.rs           # Promotes surface to a desktop window
-                ├── surface_manager.rs       # Commits, event loop, configure handling
-                └── window_manager.rs        # window_create() — full creation sequence
+    ├── lib.rs
+    ├── platform/
+    │   ├── mod.rs
+    │   └── wayland/
+    │       ├── mod.rs
+    │       ├── models/
+    │       │   ├── mod.rs
+    │       │   ├── connection.rs
+    │       │   ├── registry.rs
+    │       │   ├── shared_memory.rs
+    │       │   ├── window.rs
+    │       │   └── object_id_allocator.rs
+    │       └── managers/
+    │           ├── mod.rs
+    │           ├── connection_manager.rs
+    │           ├── registry_manager.rs
+    │           ├── bind_manager.rs
+    │           ├── shared_memory_manager.rs
+    │           ├── shm_manager.rs
+    │           ├── compositor_manager.rs
+    │           ├── xdg_manager.rs
+    │           ├── surface_manager.rs
+    │           └── window_manager.rs
+    └── rendering/
+        ├── mod.rs
+        ├── models/
+        │   ├── mod.rs
+        │   ├── color.rs
+        │   ├── pixel.rs
+        │   └── canvas.rs
+        ├── services/
+        │   ├── mod.rs
+        │   ├── buffer.rs
+        │   ├── effects.rs
+        │   └── shapes/
+        │       ├── mod.rs
+        │       ├── rect.rs
+        │       ├── line.rs
+        │       └── circle.rs
+        └── managers/
+            ├── mod.rs
+            └── renderer.rs
 ```
 
 ---
@@ -129,185 +153,222 @@ The low-level socket wrapper. Wraps a `UnixStream` and exposes four communicatio
 **Methods:**
 
 `new(stream: UnixStream) -> WaylandConnection`
-Constructs a connection from an already-open stream. Called exclusively by `connection_manager::connect()`.
+Constructs a connection from an already-open stream.
 
 `send(&mut self, data: &[u8]) -> Result<(), String>`
-Sends a slice of bytes over the socket. Used for all standard Wayland messages.
+Sends a slice of bytes over the socket.
 
 `send_with_fd(&mut self, data: &[u8], fd: RawFd) -> Result<(), String>`
-Sends bytes alongside a file descriptor using `sendmsg` with `SCM_RIGHTS`. Required for transmitting shared memory to the compositor. Internally constructs `libc::msghdr` and `libc::cmsghdr` in `unsafe` blocks.
+Sends bytes alongside a file descriptor using `sendmsg` with `SCM_RIGHTS`.
 
 `receive(&mut self, buf: &mut [u8]) -> Result<(), String>`
-Reads exactly `buf.len()` bytes from the socket using `read_exact`.
+Reads exactly `buf.len()` bytes from the socket.
 
 `set_nonblocking(&self, nonblocking: bool) -> Result<(), String>`
-Switches the socket between blocking and non-blocking mode. Used by `poll_event` to attempt a read without waiting.
+Switches the socket between blocking and non-blocking mode.
 
 ---
 
 ### `models/registry.rs` — `WaylandGlobal` and `WaylandRegistry`
 
 **`WaylandGlobal`** — a single service announced by the compositor.
-
 Fields: `name: String`, `version: u32`, `id: u32`.
 
 **`WaylandRegistry`** — the complete list of services the compositor offers.
-
 Fields: `globals: Vec<WaylandGlobal>`.
 
 ---
 
 ### `models/shared_memory.rs` — `WaylandMemory`
 
-A descriptor for a region of shared memory.
-
-**Fields:**
-- `fd: i32` — the kernel file descriptor referencing the memory region.
-- `size: usize` — the total size in bytes.
+Fields: `fd: i32`, `size: usize`.
 
 ---
 
 ### `models/window.rs` — `Window`
 
-The central platform object. Owns the connection, all Wayland object ids, the pixel pointer, and the dimensions. Implements `AzureWindowProvider` from Azure Core.
+The central platform object. Implements `AzureWindowProvider` from Azure Core.
 
-**Fields:**
-- `surface_id: u32` — the `wl_surface` object id.
-- `buffer_id: u32` — the `wl_buffer` object id.
-- `pool_id: u32` — the `wl_shm_pool` object id.
-- `xdg_toplevel_id: u32` — the `xdg_toplevel` object id.
-- `xdg_wm_id: u32` — the `xdg_wm_base` object id.
-- `xdg_surface_id: u32` — the `xdg_surface` object id.
-- `width: i32`, `height: i32` — window dimensions in pixels.
-- `ptr: *mut u8` — raw pointer to the shared memory pixel buffer.
-- `connection: WaylandConnection` — the owned Wayland socket connection.
+**Fields:** `surface_id`, `buffer_id`, `pool_id`, `xdg_toplevel_id`, `xdg_wm_id`, `xdg_surface_id`, `width: i32`, `height: i32`, `ptr: *mut u8`, `connection: WaylandConnection`.
 
 **`AzureWindowProvider` implementation:**
-
-`width() -> i32` / `height() -> i32` — return current dimensions.
-
-`render(pixels: &[u8]) -> Result<(), String>` — copies a pixel buffer into the shared memory via `from_raw_parts_mut` and `copy_from_slice`. The buffer must be exactly `width * height * 4` bytes in ARGB8888 format.
-
-`poll_event() -> Option<WindowEvent>` — attempts a non-blocking read from the socket. If no data is available, returns `None` immediately. Otherwise parses the incoming message and returns the matching `WindowEvent` variant (`WindowClose`, `WindowResize`, etc.).
-
-**Additional method:**
-
-`connection_mut(&mut self) -> &mut WaylandConnection` — gives mutable access to the connection for use by managers that operate on a `&mut Window`.
+- `render(pixels: &[u8])` — copies pixel buffer into shared memory.
+- `poll_event() -> Option<WindowEvent>` — non-blocking event polling.
 
 ---
 
 ### `models/object_id_allocator.rs` — `ObjectIdAllocator`
 
-A simple monotonic counter for assigning Wayland object ids.
-
-**Fields:**
-- `next: u32` — the next available id. Starts at `4` (ids 1-3 are reserved by `get_registry`).
-
-**Methods:**
-
-`new() -> ObjectIdAllocator` — initializes the allocator starting at id `4`.
-
-`next_id(&mut self) -> u32` — returns the current id and increments the counter.
-
-**Note:** Currently `window_manager.rs` still uses hardcoded ids for the initial window creation sequence. The allocator is available and ready; it will be integrated when multi-window support is needed.
+Monotonic counter for Wayland object ids starting at `4`.
 
 ---
 
 ## 7. Managers — logic and operations
 
 ### `managers/connection_manager.rs`
-
-**Function:** `connect() -> Result<WaylandConnection, String>`
-
-Reads `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`, constructs the socket path, and opens a `UnixStream` to it.
-
----
+`connect() -> Result<WaylandConnection, String>` — opens the Wayland socket.
 
 ### `managers/registry_manager.rs`
-
-**Functions:**
 - `get_registry(connection) -> Result<WaylandRegistry, String>`
 - `find_global(registry, interface) -> Option<u32>`
 
-`get_registry` sends `wl_display.get_registry` and `wl_display.sync`, then reads messages in a loop until the sync callback fires, parsing each `wl_registry.global` event into a `WaylandGlobal`.
-
-`find_global` looks up a service by interface name in the registry and returns its numeric id. Must be called with the result of `get_registry` from the same session — ids vary between compositor sessions.
-
----
-
 ### `managers/bind_manager.rs`
-
-**Function:** `bind_global(connection, name, interface, version, new_id) -> Result<u32, String>`
-
-Sends a `wl_registry.bind` message to activate a compositor service. Encodes the interface name as a Wayland string (null-terminated, 4-byte padded). Used for `wl_shm`, `wl_compositor`, and `xdg_wm_base`.
-
----
+`bind_global(connection, name, interface, version, new_id) -> Result<u32, String>`
 
 ### `managers/shared_memory_manager.rs`
-
-**Functions:**
-- `create_shared_memory(size) -> Result<WaylandMemory, String>` — calls `memfd_create` + `ftruncate`.
-- `map_memory(memory) -> Result<*mut u8, String>` — calls `mmap`, returns a raw pointer to the pixel buffer.
-- `unmap_memory(ptr, size) -> Result<(), String>` — calls `munmap` to release the mapping after the window closes.
-
----
+- `create_shared_memory(size) -> Result<WaylandMemory, String>`
+- `map_memory(memory) -> Result<*mut u8, String>`
+- `unmap_memory(ptr, size) -> Result<(), String>`
 
 ### `managers/shm_manager.rs`
-
-**Functions:**
-- `create_shm_pool(connection, fd, size) -> Result<u32, String>` — sends the fd to the compositor via `send_with_fd`.
-- `create_buffer(connection, pool_id, width, height) -> Result<u32, String>` — declares a rectangular ARGB8888 image from the pool.
-
----
+- `create_shm_pool(connection, fd, size) -> Result<u32, String>`
+- `create_buffer(connection, pool_id, width, height) -> Result<u32, String>`
 
 ### `managers/compositor_manager.rs`
-
-**Function:** `create_surface(connection, compositor_id) -> Result<u32, String>`
-
-Requests a blank `wl_surface` from the compositor.
-
----
+`create_surface(connection, compositor_id) -> Result<u32, String>`
 
 ### `managers/xdg_manager.rs`
-
-**Functions:**
-- `get_xdg_surface(connection, xdg_wm_base_id, surface_id) -> Result<u32, String>` — promotes a surface to shell management.
-- `get_toplevel(connection, xdg_surface_id) -> Result<u32, String>` — declares it a top-level desktop window.
-- `ack_configure(connection, xdg_surface_id, serial) -> Result<(), String>` — confirms a configure event from the compositor.
-- `attach(connection, surface_id, buffer_id) -> Result<(), String>` — links a pixel buffer to a surface.
-
----
+- `get_xdg_surface(connection, xdg_wm_base_id, surface_id) -> Result<u32, String>`
+- `get_toplevel(connection, xdg_surface_id) -> Result<u32, String>`
+- `ack_configure(connection, xdg_surface_id, serial) -> Result<(), String>`
+- `attach(connection, surface_id, buffer_id) -> Result<(), String>`
 
 ### `managers/surface_manager.rs`
-
-**Functions:**
-- `commit(connection, surface_id) -> Result<(), String>` — tells the compositor to apply pending changes and display the surface.
-- `wait_for_configure(connection, xdg_surface_id) -> Result<u32, String>` — blocking loop that waits for the first configure event and returns its serial.
-- `run_event_loop(window, xdg_surface_id, xdg_toplevel_id, surface_id, xdg_wm_base_id) -> Result<(), String>` — the main application loop. Runs until the user closes the window. Handles: compositor ping/pong (keeps the window responsive), `xdg_surface.configure` (acks and commits), `xdg_toplevel.close` (exits cleanly), and `wl_display.error` (returns a descriptive error).
-
----
+- `commit(connection, surface_id) -> Result<(), String>`
+- `damage_buffer(connection, surface_id, x, y, width, height) -> Result<(), String>` — signals to Wayland which region has changed. Must be called before every `commit` after drawing.
+- `wait_for_configure(connection, xdg_surface_id) -> Result<u32, String>`
+- `run_event_loop(window, xdg_surface_id, xdg_toplevel_id, surface_id, xdg_wm_base_id) -> Result<(), String>`
 
 ### `managers/window_manager.rs`
-
-**Function:** `window_create(width, height) -> Result<Window, String>`
-
-Orchestrates the entire window creation sequence in a single call:
-
-1. Opens the Wayland connection
-2. Discovers compositor services via the registry
-3. Binds `wl_shm`, `wl_compositor`, `xdg_wm_base`
-4. Allocates and maps shared memory, fills it with white pixels
-5. Creates the shm pool and buffer
-6. Creates the surface, xdg_surface, and toplevel
-7. Performs the configure/ack handshake
-8. Attaches the buffer and commits
-9. Returns a fully initialized `Window` ready for use
+`window_create(width, height) -> Result<Window, String>` — full creation sequence.
 
 ---
 
-## 8. The full window creation sequence
+## 8. Rendering module
 
-The complete sequence, as executed by `window_create`:
+The rendering module is a CPU-based software renderer operating on a flat pixel buffer. It is entirely independent of Wayland — it writes to a `Canvas` in memory, and the caller copies the canvas to the window's shared memory before committing.
+
+### The rendering pipeline
+
+```
+draw_*(canvas)           → writes pixels into canvas.buffer
+copy_nonoverlapping()    → copies canvas.buffer into window.ptr()
+damage_buffer()          → marks the region as changed
+attach() + commit()      → Wayland displays the result
+```
+
+### Pixel addressing
+
+Every pixel is addressed by the formula `(y * width + x) * 4`. Wayland expects pixels in BGRA order. The rendering module stores pixels in RGBA order internally — the BGRA conversion happens at the `set_pixel` level.
+
+### `rendering/models/`
+
+**`color.rs` — `Color`**
+```rust
+pub struct Color { pub r: u8, pub g: u8, pub b: u8, pub a: u8 }
+```
+`Color::new(r, g, b, a) -> Color`
+
+**`pixel.rs` — `Pixel`**
+```rust
+pub struct Pixel { pub x: u32, pub y: u32, pub color: Color }
+```
+
+**`canvas.rs` — `Canvas`**
+```rust
+pub struct Canvas { pub width: u32, pub height: u32, pub buffer: Vec<u8> }
+```
+`Canvas::new(width, height) -> Canvas` — allocates `width * height * 4` bytes initialized to zero.
+
+---
+
+### `rendering/services/buffer.rs`
+
+**`get_pixel_index(x: u32, y: u32, width: u32) -> usize`**
+Returns the byte offset of pixel `(x, y)` in the flat buffer.
+
+**`set_pixel(buffer: &mut Vec<u8>, x: u32, y: u32, width: u32, height: u32, color: &Color)`**
+Writes RGBA values at the correct offset. Performs bounds checking — silently ignores out-of-bounds writes.
+
+---
+
+### `rendering/services/shapes/`
+
+**`rect.rs`**
+
+`draw_rect(x: u32, y: u32, width: u32, height: u32, color: &Color, canvas: &mut Canvas)`
+Fills a solid rectangle by iterating over all pixels in the bounding box.
+
+`draw_rect_rounded(x: u32, y: u32, width: u32, height: u32, radius: u32, color: &Color, canvas: &mut Canvas)`
+Draws a rectangle with rounded corners. Composed of three rectangles (center + top band + bottom band) and four `draw_circle_filled` calls at the corners. The `radius` must be less than half the smallest side.
+
+---
+
+**`line.rs`**
+
+`draw_line_horizontal(x: u32, x_end: u32, y: u32, color: &Color, canvas: &mut Canvas)`
+Draws a horizontal line from `x` to `x_end` at fixed `y`.
+
+`draw_line_vertical(y: u32, y_end: u32, x: u32, color: &Color, canvas: &mut Canvas)`
+Draws a vertical line from `y` to `y_end` at fixed `x`.
+
+`draw_line(x: i32, y: i32, x_end: i32, y_end: i32, color: &Color, canvas: &mut Canvas)`
+General line drawing using Bresenham's algorithm. Handles all angles and directions. Uses `i32` coordinates to support all four directional combinations (positive/negative dx/dy).
+
+---
+
+**`circle.rs`**
+
+`draw_circle(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas)`
+Draws a circle outline using the Midpoint Circle algorithm. Exploits 8-fold symmetry — computes one octant and reflects to all eight simultaneously.
+
+`draw_circle_filled(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas)`
+Draws a filled circle by drawing horizontal lines between symmetric boundary points at each step of the Midpoint algorithm.
+
+---
+
+### `rendering/managers/renderer.rs`
+
+The public API of the rendering module. Delegates to the appropriate service.
+
+`draw_rect(x, y, width, height, color, canvas)` — delegates to `shapes::rect::draw_rect`.
+
+More functions will be added here as the rendering module grows (lines, circles, effects, text).
+
+---
+
+### Correct rendering sequence (from tests)
+
+```rust
+let mut canvas = Canvas::new(800, 600);
+let color = Color::new(255, 0, 0, 255);
+
+// Draw
+draw_rect(100, 50, 200, 100, &color, &mut canvas);
+draw_circle(400, 300, 80, &color, &mut canvas);
+
+// Copy to Wayland shared memory
+unsafe {
+    std::ptr::copy_nonoverlapping(
+        canvas.buffer.as_ptr(),
+        window.ptr(),
+        canvas.buffer.len(),
+    );
+}
+
+// Signal and display
+let buffer_id = window.buffer_id();
+attach(window.connection_mut(), surface_id, buffer_id)?;
+damage_buffer(window.connection_mut(), surface_id, 0, 0, width, height)?;
+commit(window.connection_mut(), surface_id)?;
+
+// Keep alive
+run_event_loop(&mut window, ...)?;
+```
+
+---
+
+## 9. The full window creation sequence
 
 ```
 connect()                              → opens Unix socket to compositor
@@ -316,7 +377,6 @@ find_global("wl_shm/compositor/xdg")  → gets dynamic numeric ids
 bind_global("wl_shm", 4)              → activates shm service
 create_shared_memory(w*h*4)           → allocates RAM via memfd_create + ftruncate
 map_memory(fd)                         → maps RAM into process address space
-pixels.fill(0xFF)                      → writes white pixels (ARGB8888)
 create_shm_pool(fd, size)             → tells compositor to use our RAM
 create_buffer(pool, width, height)    → declares a displayable image
 bind_global("wl_compositor", 7)       → activates compositor service
@@ -327,18 +387,18 @@ get_toplevel(xdg_surface)             → declares it a top-level window
 commit(surface)                        → triggers configure event from compositor
 wait_for_configure(xdg_surface)       → waits for compositor approval
 ack_configure(xdg_surface, serial)    → confirms the configuration
+damage_buffer(surface, 0, 0, w, h)   → marks full buffer as changed
 attach(surface, buffer)               → links pixel data to the surface
 commit(surface)                        → displays the window on screen
 
+→ caller draws into a Canvas, copies to window.ptr(), then attach+damage+commit
 → caller invokes run_event_loop() to keep window alive
 → caller invokes unmap_memory() after the loop exits
 ```
 
-After `window_create`, the caller has a `Window` object. It calls `run_event_loop(&mut window, ...)` to keep it alive and responsive, and `unmap_memory` to clean up when done.
-
 ---
 
-## 9. Dependencies
+## 10. Dependencies
 
 ```toml
 [dependencies]
@@ -348,49 +408,65 @@ azure-core = { path = "../azure-core" }
 
 | Dependency | Purpose |
 |---|---|
-| `libc` | System calls not in Rust std: `memfd_create`, `ftruncate`, `mmap`, `munmap`, `sendmsg`, `CMSG_*`, `SCM_RIGHTS` |
+| `libc` | `memfd_create`, `ftruncate`, `mmap`, `munmap`, `sendmsg`, `CMSG_*`, `SCM_RIGHTS` |
 | `azure-core` | `AzureWindowProvider` trait and `WindowEvent` enum |
 
 ---
 
-## 10. Current capabilities
+## 11. Current capabilities and limitations
 
 **What works:**
-- Opening a persistent, interactive window on any Linux Wayland desktop (GNOME, KDE, Sway...)
-- Dynamic compositor service discovery — no hardcoded session-specific ids
-- Shared memory allocation and pixel-level access via `mmap`
-- File descriptor transmission between processes via `SCM_RIGHTS`
-- Full event loop: ping/pong keepalive, configure/ack, clean close on user request
-- Protocol error detection with descriptive messages
-- `AzureWindowProvider` trait implemented — Foundation-ready API
-- `render(pixels)` — write arbitrary pixel content to the window
-- `poll_event()` — non-blocking event polling returning `WindowEvent`
-- `ObjectIdAllocator` — dynamic id assignment ready for multi-window use
-- Proper memory cleanup via `unmap_memory` on window close
-- Single entry point: `window_create(width, height)` encapsulates the entire sequence
+- Persistent, interactive window on any Linux Wayland desktop
+- Dynamic compositor service discovery
+- Shared memory allocation and pixel-level access
+- File descriptor transmission via `SCM_RIGHTS`
+- Full event loop: ping/pong, configure/ack, clean close
+- `AzureWindowProvider` trait implemented
+- `render(pixels)` and `poll_event()` on `Window`
+- **CPU software renderer — fully operational:**
+  - `Canvas` — drawing surface with flat pixel buffer
+  - `Color` — RGBA color model
+  - `set_pixel` / `get_pixel_index` — pixel-level access with bounds checking
+  - `draw_rect` — filled rectangle
+  - `draw_rect_rounded` — rectangle with rounded corners
+  - `draw_line_horizontal` / `draw_line_vertical` — axis-aligned lines
+  - `draw_line` — general line via Bresenham's algorithm
+  - `draw_circle` — circle outline via Midpoint Circle algorithm
+  - `draw_circle_filled` — filled circle
 
 **Current limitations:**
-- Object ids in `window_manager.rs` are still partially hardcoded — `ObjectIdAllocator` exists but is not yet wired in
-- No keyboard/mouse input routing — `poll_event` detects close and resize, but not key presses or mouse moves yet
-- No dynamic resize — `WindowResize` events are detected but the buffer is not recreated
-- `rendering/` module does not exist yet — only solid color fill is possible
-- Linux/Wayland only — `win32/` and `cocoa/` implementations not started
+- Wayland pixel order is BGRA — conversion currently handled at `set_pixel` level
+- Object ids in `window_manager.rs` partially hardcoded
+- No keyboard/mouse input routing yet
+- No dynamic resize
+- `effects.rs` not yet implemented (alpha blending, gradients, anti-aliasing)
+- `text/` not yet implemented (font loading, glyph rasterization, kerning)
 
 ---
 
-## 11. What comes next
+## 12. What comes next
 
-**Dynamic resize** — when `poll_event` returns `WindowResize(w, h)`, recreate the shared memory, pool, buffer, and remap pixels at the new size.
+**Effects (`rendering/services/effects.rs`):**
+- Alpha blending — compositing semi-transparent pixels
+- Gradient fill — linear color interpolation
+- Anti-aliasing — smooth edges on circles and diagonal lines
 
-**Input routing** — bind `wl_seat`, parse keyboard and mouse events, return them as `WindowKeyPress` and `WindowMouseMove` variants.
+**Text rendering (`rendering/services/text/`):**
+- `loader.rs` — TTF font file loading
+- `glyph.rs` — character shape extraction
+- `renderer.rs` — pixel-level glyph rasterization
+- `kerning.rs` — character spacing
 
-**`rendering/` module** — drawing primitives from scratch:
-- Rectangles, lines, circles — pixel-level rasterization
-- Alpha blending and transparency
-- Font loading and text rendering (Bézier glyph rasterization) — the largest remaining piece of work in Engine
+**Input routing:**
+- Bind `wl_seat`, parse keyboard and pointer events
+- Return as `WindowKeyPress`, `WindowMouseMove` variants
 
-**`win32/` and `cocoa/`** — future platform implementations of `AzureWindowProvider` for Windows and macOS.
+**Dynamic resize:**
+- Recreate shared memory and buffer on `WindowResize` event
+
+**Future platforms:**
+- `win32/` and `cocoa/` implementations of `AzureWindowProvider`
 
 ---
 
-*Azure Engine is built entirely from scratch, without any GUI framework or Wayland binding library. Every byte of every Wayland message is constructed manually. This is intentional: the goal is complete understanding and control of the entire display stack, from the Unix socket to the pixels on screen.*
+*Azure Engine is built entirely from scratch, without any GUI framework or Wayland binding library. Every byte of every Wayland message is constructed manually. The rendering module follows the same philosophy: no graphics library, pure CPU rasterization from first principles.*
