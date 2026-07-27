@@ -1,3 +1,5 @@
+//pixel is page for coloring pixels
+
 use crate::rendering::models::color::Color;
 
 pub struct Pixel {

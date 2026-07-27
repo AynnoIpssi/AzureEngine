@@ -3,6 +3,8 @@ use crate::rendering::models::color::Color;
 use crate::rendering::services::buffer::set_pixel;
 use crate::rendering::services::shapes::circle::draw_circle_filled;
 
+//-----------------------(Rectangle)------------------------->
+
 pub fn draw_rect(x: u32, y: u32, width: u32, height: u32, color: &Color, canvas: &mut Canvas) {
 
     for y in y..y + height {
@@ -11,6 +13,8 @@ pub fn draw_rect(x: u32, y: u32, width: u32, height: u32, color: &Color, canvas:
         }
     }
 }
+
+//---------------------------(RectangleRounded)------------------->
 
 pub fn draw_rect_rounded(x: u32, y: u32, width: u32, height: u32, radius: u32, color: &Color, canvas: &mut Canvas) {
     draw_circle_filled((x + radius) as i32, (y + radius) as i32, radius, color, canvas);
