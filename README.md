@@ -1,6 +1,6 @@
 # Azure Engine — Technical Documentation
 
-**Version:** V0.2  
+**Version:** V1.0  
 **Language:** Rust (2024 edition)  
 **Platform:** Linux (Wayland)  
 **Status:** Active development — rendering module operational
