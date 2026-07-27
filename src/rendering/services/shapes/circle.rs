@@ -1,54 +1,39 @@
 use crate::rendering::models::canvas::Canvas;
 use crate::rendering::models::color::Color;
-use crate::rendering::services::buffer::set_pixel;
-use crate::rendering::services::shapes::line::draw_line_horizontal;
+use crate::rendering::services::effects::apply_aa;
+use crate::rendering::services::effects::blend_pixel;
 
-pub fn draw_circle(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas){
-    let mut x = 0;
-    let mut y = radius as i32;
-    let mut d = 3 - 2 * radius as i32;
 
-    while x <= y {
-        set_pixel(&mut canvas.buffer, (cx + x) as u32, (cy + y) as u32, canvas.width, canvas.height, color);
-        set_pixel(&mut canvas.buffer, (cx - x) as u32, (cy - y) as u32, canvas.width, canvas.height, color);
-        set_pixel(&mut canvas.buffer, (cx + x) as u32, (cy - y) as u32, canvas.width, canvas.height, color);
-        set_pixel(&mut canvas.buffer, (cx - x) as u32, (cy + y) as u32, canvas.width, canvas.height, color);
-        set_pixel(&mut canvas.buffer, (cx + y) as u32, (cy + x) as u32, canvas.width, canvas.height, color);
-        set_pixel(&mut canvas.buffer, (cx - y) as u32, (cy - x) as u32, canvas.width, canvas.height, color);
-        set_pixel(&mut canvas.buffer, (cx + y) as u32, (cy - x) as u32, canvas.width, canvas.height, color);
-        set_pixel(&mut canvas.buffer, (cx - y) as u32, (cy + x) as u32, canvas.width, canvas.height, color);
+//-----------------------(EmptyCirle)---------------------------->
 
-        if d < 0{
-
-            d += (4 * x + 6);
-        } else {
-
-            y -= 1; 
-            d += 4 * (x - y) + 10;
+pub fn draw_circle(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas) {
+    let r = radius as i32;
+    for py in (cy - r - 1)..(cy + r + 1) {
+        for px in (cx - r - 1)..(cx + r + 1) {
+            let dist = (((px - cx).pow(2) + (py - cy).pow(2)) as f32).sqrt() - radius as f32;
+            let dist_abs = dist.abs();
+            let alpha = apply_aa(dist_abs - 0.5);
+            if alpha > 0 && px >= 0 && py >= 0 {
+                let blended_color = Color::new(color.r, color.g, color.b, alpha);
+                blend_pixel(&mut canvas.buffer, px as u32, py as u32, canvas.width, canvas.height, &blended_color);
+            }
         }
-            
-        x += 1;
     }
 }
 
 
-pub fn draw_circle_filled(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas){
-    let mut x = 0;
-    let mut y = radius as i32;
-    let mut d = 3 - 2 * radius as i32;
+//-----------------------(FilledCirle)---------------------------->
 
-    while x <= y {
-        draw_line_horizontal((cx - x) as u32, (cx + x) as u32, (cy + y) as u32, color, canvas);
-        draw_line_horizontal((cx - x) as u32, (cx + x) as u32, (cy - y) as u32, color, canvas);
-        draw_line_horizontal((cx - y) as u32, (cx + y) as u32, (cy + x) as u32, color, canvas);
-        draw_line_horizontal((cx - y) as u32, (cx + y) as u32, (cy - x) as u32, color, canvas);
-        
-        if d < 0 {
-            d += 4 * x + 6;
-        } else {
-            y -= 1;
-            d += 4 * (x - y) + 10;
+pub fn draw_circle_filled(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas) {
+    let r = radius as i32;
+    for py in (cy - r - 1)..(cy + r + 1) {
+        for px in (cx - r - 1)..(cx + r + 1) {
+            let dist = (((px - cx).pow(2) + (py - cy).pow(2)) as f32).sqrt() - radius as f32;
+            let alpha = apply_aa(dist);
+            if alpha > 0 && px >= 0 && py >= 0 {
+                let blended_color = Color::new(color.r, color.g, color.b, alpha);
+                blend_pixel(&mut canvas.buffer, px as u32, py as u32, canvas.width, canvas.height, &blended_color);
+            }
         }
-        x += 1;
     }
 }
