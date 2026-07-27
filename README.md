@@ -3,7 +3,7 @@
 **Version:** V0.2  
 **Language:** Rust (2024 edition)  
 **Platform:** Linux (Wayland)  
-**Status:** Active development — rendering module in progress
+**Status:** Active development — rendering module operational
 
 ---
 
@@ -96,6 +96,7 @@ azure-engine/
 ├── Cargo.toml
 └── src/
     ├── lib.rs
+    ├── Sora-VariableFont_wght.ttf
     ├── platform/
     │   ├── mod.rs
     │   └── wayland/
@@ -124,16 +125,23 @@ azure-engine/
         │   ├── mod.rs
         │   ├── color.rs
         │   ├── pixel.rs
-        │   └── canvas.rs
+        │   ├── canvas.rs
+        │   └── glyph.rs
         ├── services/
         │   ├── mod.rs
         │   ├── buffer.rs
         │   ├── effects.rs
-        │   └── shapes/
+        │   ├── shapes/
+        │   │   ├── mod.rs
+        │   │   ├── rect.rs
+        │   │   ├── line.rs
+        │   │   └── circle.rs
+        │   └── text/
         │       ├── mod.rs
-        │       ├── rect.rs
-        │       ├── line.rs
-        │       └── circle.rs
+        │       ├── loader.rs
+        │       ├── glyph.rs
+        │       ├── renderer.rs
+        │       └── kerning.rs
         └── managers/
             ├── mod.rs
             └── renderer.rs
@@ -203,6 +211,51 @@ Monotonic counter for Wayland object ids starting at `4`.
 
 ---
 
+### `rendering/models/color.rs` — `Color`
+
+```rust
+pub struct Color { pub r: u8, pub g: u8, pub b: u8, pub a: u8 }
+```
+`Color::new(r, g, b, a) -> Color`
+
+---
+
+### `rendering/models/pixel.rs` — `Pixel`
+
+```rust
+pub struct Pixel { pub x: u32, pub y: u32, pub color: Color }
+```
+
+---
+
+### `rendering/models/canvas.rs` — `Canvas`
+
+```rust
+pub struct Canvas { pub width: u32, pub height: u32, pub buffer: Vec<u8> }
+```
+`Canvas::new(width, height) -> Canvas` — allocates `width * height * 4` bytes initialized to zero.
+
+---
+
+### `rendering/models/glyph.rs` — `Glyph`
+
+Holds a rasterized glyph's geometry after extraction from a TTF font.
+
+```rust
+pub struct Glyph {
+    pub width: f32,
+    pub height: f32,
+    pub advance_width: f32,
+    pub contours: Vec<Vec<(f32, f32)>>,
+}
+```
+
+- `width` / `height` — bounding box in scaled pixels.
+- `advance_width` — horizontal cursor advance after drawing this glyph.
+- `contours` — the outline as a list of closed polygons, each a list of `(x, y)` points in `[0, width] × [0, height]` space (origin at bottom-left, matching font coordinate conventions).
+
+---
+
 ## 7. Managers — logic and operations
 
 ### `managers/connection_manager.rs`
@@ -261,34 +314,15 @@ attach() + commit()      → Wayland displays the result
 
 Every pixel is addressed by the formula `(y * width + x) * 4`. Wayland expects pixels in BGRA order. The rendering module stores pixels in RGBA order internally — the BGRA conversion happens at the `set_pixel` level.
 
-### `rendering/models/`
-
-**`color.rs` — `Color`**
-```rust
-pub struct Color { pub r: u8, pub g: u8, pub b: u8, pub a: u8 }
-```
-`Color::new(r, g, b, a) -> Color`
-
-**`pixel.rs` — `Pixel`**
-```rust
-pub struct Pixel { pub x: u32, pub y: u32, pub color: Color }
-```
-
-**`canvas.rs` — `Canvas`**
-```rust
-pub struct Canvas { pub width: u32, pub height: u32, pub buffer: Vec<u8> }
-```
-`Canvas::new(width, height) -> Canvas` — allocates `width * height * 4` bytes initialized to zero.
-
 ---
 
 ### `rendering/services/buffer.rs`
 
-**`get_pixel_index(x: u32, y: u32, width: u32) -> usize`**
+**`get_pixel_index(x, y, width) -> usize`**
 Returns the byte offset of pixel `(x, y)` in the flat buffer.
 
-**`set_pixel(buffer: &mut Vec<u8>, x: u32, y: u32, width: u32, height: u32, color: &Color)`**
-Writes RGBA values at the correct offset. Performs bounds checking — silently ignores out-of-bounds writes.
+**`set_pixel(buffer, x, y, width, height, color)`**
+Writes RGBA values at the correct offset. Bounds-checked — silently ignores out-of-bounds writes.
 
 ---
 
@@ -296,58 +330,135 @@ Writes RGBA values at the correct offset. Performs bounds checking — silently 
 
 **`rect.rs`**
 
-`draw_rect(x: u32, y: u32, width: u32, height: u32, color: &Color, canvas: &mut Canvas)`
+`draw_rect(x, y, width, height, color, canvas)`
 Fills a solid rectangle by iterating over all pixels in the bounding box.
 
-`draw_rect_rounded(x: u32, y: u32, width: u32, height: u32, radius: u32, color: &Color, canvas: &mut Canvas)`
-Draws a rectangle with rounded corners. Composed of three rectangles (center + top band + bottom band) and four `draw_circle_filled` calls at the corners. The `radius` must be less than half the smallest side.
+`draw_rect_rounded(x, y, width, height, radius, color, canvas)`
+Rectangle with rounded corners. Composed of three filled rects and four `draw_circle_filled` calls at the corners.
 
 ---
 
 **`line.rs`**
 
-`draw_line_horizontal(x: u32, x_end: u32, y: u32, color: &Color, canvas: &mut Canvas)`
-Draws a horizontal line from `x` to `x_end` at fixed `y`.
+`draw_line_horizontal(x, x_end, y, color, canvas)`
+Horizontal line from `x` to `x_end` at fixed `y`.
 
-`draw_line_vertical(y: u32, y_end: u32, x: u32, color: &Color, canvas: &mut Canvas)`
-Draws a vertical line from `y` to `y_end` at fixed `x`.
+`draw_line_vertical(y, y_end, x, color, canvas)`
+Vertical line from `y` to `y_end` at fixed `x`.
 
-`draw_line(x: i32, y: i32, x_end: i32, y_end: i32, color: &Color, canvas: &mut Canvas)`
-General line drawing using Bresenham's algorithm. Handles all angles and directions. Uses `i32` coordinates to support all four directional combinations (positive/negative dx/dy).
+`draw_line(x, y, x_end, y_end, color, canvas)`
+General line via Bresenham's algorithm. Handles all angles and directions. Uses `i32` coordinates to support all four directional combinations.
 
 ---
 
 **`circle.rs`**
 
-`draw_circle(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas)`
-Draws a circle outline using the Midpoint Circle algorithm. Exploits 8-fold symmetry — computes one octant and reflects to all eight simultaneously.
+`draw_circle(cx, cy, radius, color, canvas)`
+Circle outline via the Midpoint Circle algorithm. Exploits 8-fold symmetry.
 
-`draw_circle_filled(cx: i32, cy: i32, radius: u32, color: &Color, canvas: &mut Canvas)`
-Draws a filled circle by drawing horizontal lines between symmetric boundary points at each step of the Midpoint algorithm.
+`draw_circle_filled(cx, cy, radius, color, canvas)`
+Filled circle by drawing horizontal spans between symmetric boundary points.
+
+---
+
+### `rendering/services/effects.rs`
+
+**`blend_pixel(buffer, x, y, width, height, color)`**
+Composites a semi-transparent color over the existing pixel using the standard Porter-Duff `over` formula in sRGB space.
+
+**`draw_gradient_horizontal(x, y, width, height, color_start, color_end, canvas)`**
+Fills a rectangle with a left-to-right linear gradient between two colors.
+
+**`draw_vertical_gradient(x, y, width, height, color_start, color_end, canvas)`**
+Fills a rectangle with a top-to-bottom linear gradient between two colors.
+
+**`draw_angular_gradiant(x, y, width, height, angle, color_start, color_end, canvas)`**
+Fills a rectangle with a gradient along an arbitrary angle in degrees.
+
+**`apply_aa(distance) -> u8`**
+Returns an alpha value in `[0, 255]` for a signed distance field input. Used for smooth circle outlines.
+
+---
+
+### `rendering/services/text/`
+
+The text subsystem loads TTF fonts, extracts glyph outlines, and rasterizes them with high-quality anti-aliasing. It is entirely CPU-based and depends only on `ttf-parser` for outline data.
+
+---
+
+**`text/loader.rs`**
+
+`load_font(path: &str) -> Result<Vec<u8>, String>`
+Reads a TTF/OTF font file from disk into a byte buffer. The buffer is passed by reference to all subsequent glyph operations.
+
+---
+
+**`text/glyph.rs`**
+
+`exctract_glyph(font_data: &[u8], character: char, size: f32) -> Result<Glyph, String>`
+
+Extracts a single character's outline from the font and returns a `Glyph` ready for rasterization.
+
+**Pipeline:**
+1. Parse the font face with `ttf_parser::Face::parse`.
+2. Look up the glyph id for `character`.
+3. Walk the TTF outline commands (`move_to`, `line_to`, `quad_to`, `curve_to`, `close`) using a custom `OutlineBuilder`.
+4. Bezier curves are flattened via **recursive De Casteljau subdivision** with a flatness threshold of `0.5` font units — curves split until the maximum deviation of any control point from the chord is below this threshold (capped at 8 levels of recursion). This produces smooth outlines with the minimum number of line segments.
+5. All contour points are scaled by `size / units_per_em` and normalized so the origin is at the glyph's bounding box minimum. The result is in `[0, width] × [0, height]` pixel space.
+
+---
+
+**`text/renderer.rs`**
+
+`draw_glyph(glyph: &Glyph, x: u32, y: u32, color: &Color, canvas: &mut Canvas)`
+
+Rasterizes a `Glyph` onto the canvas at pixel position `(x, y)` using a high-quality scanline algorithm.
+
+**Algorithm:**
+
+1. For each pixel row `py` (0 to `height`):
+   - Cast **8 vertical sub-scanlines** at positions `py + (s + 0.5) / 8` for `s` in `0..8`.
+   - For each sub-scanline, find all x-intersections with the glyph contour edges using the standard half-open interval rule (avoids double-counting shared vertices).
+   - Sort intersections and fill in pairs (even-odd rule).
+   - For each pixel column within a filled span, accumulate the **exact fractional horizontal coverage** of `[px, px+1]` that falls inside the span.
+2. Normalize accumulated coverage across 8 sub-scanlines to get a value in `[0, 1]`.
+3. Multiply by the color's own alpha channel.
+4. **Blend in linear light:** convert the foreground color and background pixel from sRGB to linear, apply the Porter-Duff `over` operator, convert back to sRGB.
+
+The gamma-correct blend step is the most visually significant: blending in perceptually-encoded sRGB space produces edges that are too dark at mid-coverage. Blending in linear space gives edges the correct physical weight — identical to what FreeType and all modern text engines produce.
+
+---
+
+**`text/kerning.rs`**
+
+`get_advance(glyph: &Glyph) -> f32`
+Returns the horizontal advance width of a glyph (cursor movement after drawing).
 
 ---
 
 ### `rendering/managers/renderer.rs`
 
-The public API of the rendering module. Delegates to the appropriate service.
+The public API of the rendering module.
 
-`draw_rect(x, y, width, height, color, canvas)` — delegates to `shapes::rect::draw_rect`.
+`draw_rect(x, y, width, height, color, canvas)`
+Delegates to `shapes::rect::draw_rect`.
 
-More functions will be added here as the rendering module grows (lines, circles, effects, text).
+`draw_text(text, font_path, x, y, size, color, canvas) -> Result<(), String>`
+Draws a string of characters at position `(x, y)` in the given font and size. Iterates over each character, extracts its glyph, draws it, then advances the cursor by `advance_width`.
 
 ---
 
 ### Correct rendering sequence (from tests)
 
 ```rust
-let mut canvas = Canvas::new(800, 600);
-let color = Color::new(255, 0, 0, 255);
+let mut canvas = Canvas::new(800, 800);
+let red = Color::new(255, 0, 0, 255);
 
-// Draw
-draw_rect(100, 50, 200, 100, &color, &mut canvas);
-draw_circle(400, 300, 80, &color, &mut canvas);
+draw_rect(20, 50, 160, 120, &red, &mut canvas);
+draw_circle(520, 110, 60, &red, &mut canvas);
+draw_gradient_horizontal(220, 430, 180, 100, &red, &blue, &mut canvas);
+draw_text("Hello", "src/Sora-VariableFont_wght.ttf", 100, 700, 32.0, &red, &mut canvas)?;
 
-// Copy to Wayland shared memory
 unsafe {
     std::ptr::copy_nonoverlapping(
         canvas.buffer.as_ptr(),
@@ -356,13 +467,9 @@ unsafe {
     );
 }
 
-// Signal and display
-let buffer_id = window.buffer_id();
 attach(window.connection_mut(), surface_id, buffer_id)?;
 damage_buffer(window.connection_mut(), surface_id, 0, 0, width, height)?;
 commit(window.connection_mut(), surface_id)?;
-
-// Keep alive
 run_event_loop(&mut window, ...)?;
 ```
 
@@ -403,12 +510,14 @@ commit(surface)                        → displays the window on screen
 ```toml
 [dependencies]
 libc = "0.2"
+ttf-parser = "0.21"
 azure-core = { path = "../azure-core" }
 ```
 
 | Dependency | Purpose |
 |---|---|
 | `libc` | `memfd_create`, `ftruncate`, `mmap`, `munmap`, `sendmsg`, `CMSG_*`, `SCM_RIGHTS` |
+| `ttf-parser` | TTF/OTF font parsing — glyph outline extraction, bounding boxes, advance widths |
 | `azure-core` | `AzureWindowProvider` trait and `WindowEvent` enum |
 
 ---
@@ -421,8 +530,7 @@ azure-core = { path = "../azure-core" }
 - Shared memory allocation and pixel-level access
 - File descriptor transmission via `SCM_RIGHTS`
 - Full event loop: ping/pong, configure/ack, clean close
-- `AzureWindowProvider` trait implemented
-- `render(pixels)` and `poll_event()` on `Window`
+- `AzureWindowProvider` trait implemented — `render(pixels)` and `poll_event()`
 - **CPU software renderer — fully operational:**
   - `Canvas` — drawing surface with flat pixel buffer
   - `Color` — RGBA color model
@@ -433,39 +541,33 @@ azure-core = { path = "../azure-core" }
   - `draw_line` — general line via Bresenham's algorithm
   - `draw_circle` — circle outline via Midpoint Circle algorithm
   - `draw_circle_filled` — filled circle
+  - `blend_pixel` — Porter-Duff alpha compositing
+  - `draw_gradient_horizontal` / `draw_vertical_gradient` — linear gradients
+  - `draw_angular_gradiant` — gradient along an arbitrary angle
+  - `draw_text` — high-quality TTF text rendering with full AA
 
 **Current limitations:**
-- Wayland pixel order is BGRA — conversion currently handled at `set_pixel` level
+- Wayland pixel order is BGRA — conversion handled at `set_pixel` level
 - Object ids in `window_manager.rs` partially hardcoded
 - No keyboard/mouse input routing yet
 - No dynamic resize
-- `effects.rs` not yet implemented (alpha blending, gradients, anti-aliasing)
-- `text/` not yet implemented (font loading, glyph rasterization, kerning)
 
 ---
 
 ## 12. What comes next
 
-**Effects (`rendering/services/effects.rs`):**
-- Alpha blending — compositing semi-transparent pixels
-- Gradient fill — linear color interpolation
-- Anti-aliasing — smooth edges on circles and diagonal lines
-
-**Text rendering (`rendering/services/text/`):**
-- `loader.rs` — TTF font file loading
-- `glyph.rs` — character shape extraction
-- `renderer.rs` — pixel-level glyph rasterization
-- `kerning.rs` — character spacing
-
 **Input routing:**
 - Bind `wl_seat`, parse keyboard and pointer events
-- Return as `WindowKeyPress`, `WindowMouseMove` variants
+- Return as `WindowKeyPress`, `WindowMouseMove` variants from `poll_event()`
 
 **Dynamic resize:**
 - Recreate shared memory and buffer on `WindowResize` event
 
 **Future platforms:**
-- `win32/` and `cocoa/` implementations of `AzureWindowProvider`
+- `win32/` — `AzureWindowProvider` implementation using the Win32 API (CreateWindow, GDI shared memory)
+- `cocoa/` — `AzureWindowProvider` implementation using Cocoa / Core Graphics on macOS
+
+All platform-specific code will live under `src/platform/<target>/` behind the same `AzureWindowProvider` trait, keeping Foundation and all applications fully portable.
 
 ---
 
